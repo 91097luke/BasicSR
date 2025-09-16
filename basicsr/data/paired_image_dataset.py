@@ -151,14 +151,14 @@ def get_bands(image: np.ndarray, bands: str):
     """
 
     if bands == 'bgr':
-        return image[:, :, [0, 1, 2]]
+        return image[[0, 1, 2], :, :]
     elif bands == 'bgnir':
-        return image[:, :, [0, 1, 3]]
+        return image[[0, 1, 3], :, :]
     elif bands == 'all':
         if random.random() < 0.5:
-            return image[:, :, [0, 1, 2]]  # bgr
+            return image[[0, 1, 2], :, :] # bgr
         else:
-            return image[:, :, [0, 1, 3]]  # bgnir
+            return image[[0, 1, 3], :, :]  # bgnir
     else:
         raise ValueError(f'Unsupported bands: {bands}. Supported ones are "bgr", "bgnir", "all".')
 
