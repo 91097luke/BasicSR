@@ -950,7 +950,7 @@ class HAT(nn.Module):
     def forward_features(self, x):
         x_size = (x.shape[2], x.shape[3])
 
-        # Calculate attention mask and relative position index in advance to speed up inference. 
+        # Calculate attention mask and relative position index in advance to speed up inference.
         # The original code is very time-consuming for large window size.
         attn_mask = self.calculate_mask(x_size).to(x.device)
         params = {'attn_mask': attn_mask, 'rpi_sa': self.relative_position_index_SA, 'rpi_oca': self.relative_position_index_OCA}
@@ -980,5 +980,25 @@ class HAT(nn.Module):
             x = self.conv_last(self.upsample(x))
 
         x = x / self.img_range + self.mean
+
+        return x
+
+
+@ARCH_REGISTRY.register()
+class HAT_RS(HAT):
+    """ A variant of HAT for real-world image super-resolution.
+        It removes the imagenet normalization in the forward function.
+    """
+
+    def __init__(self, **kwargs):
+        super(HAT_RS, self).__init__(**kwargs)
+
+    def forward(self, x):
+        if self.upsampler == 'pixelshuffle':
+            # for classical SR
+            x = self.conv_first(x)
+            x = self.conv_after_body(self.forward_features(x)) + x
+            x = self.conv_before_upsample(x)
+            x = self.conv_last(self.upsample(x))
 
         return x

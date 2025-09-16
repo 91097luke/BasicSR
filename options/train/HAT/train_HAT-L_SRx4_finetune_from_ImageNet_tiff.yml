@@ -16,13 +16,15 @@ datasets:
       type: disk
 
     gt_size: 256
+    lq_size: 64
     use_hflip: true
     use_rot: true
+    bands: bgr # specify the bands to use [bgr, bgnir, all]
 
     # data loader
     use_shuffle: true
-    num_worker_per_gpu: 6
-    batch_size_per_gpu: 4
+    num_worker_per_gpu: 0
+    batch_size_per_gpu: 1
     dataset_enlarge_ratio: 1
     prefetch_mode: ~
 
@@ -53,7 +55,7 @@ datasets:
 
 # network structures
 network_g:
-  type: HAT
+  type: HAT_RS
   upscale: 4
   in_chans: 3
   img_size: 64
@@ -103,7 +105,7 @@ train:
 # validation settings
 val:
   val_freq: !!float 5e3
-  save_img: false
+  save_img: true
   pbar: False
 
   metrics:
