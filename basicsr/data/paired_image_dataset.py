@@ -151,17 +151,149 @@ def get_bands(image: np.ndarray, bands: str):
     """
 
     if bands == 'bgr':
-        return image[[0, 1, 2], :, :]
+        return image[[0, 1, 2], :, :], 'bgr'
     elif bands == 'bgnir':
-        return image[[0, 1, 3], :, :]
+        return image[[0, 1, 3], :, :], 'bgnir'
     elif bands == 'all':
         if random.random() < 0.5:
-            return image[[0, 1, 2], :, :] # bgr
+            return image[[0, 1, 2], :, :], 'bgr' # bgr
         else:
-            return image[[0, 1, 3], :, :]  # bgnir
+            return image[[0, 1, 3], :, :], 'bgnir'  # bgnir
     else:
         raise ValueError(f'Unsupported bands: {bands}. Supported ones are "bgr", "bgnir", "all".')
+def create_exponential_gradient(width, height, decay_rate=5.0):
+    """
+    Creates a 2D image with pixel values that exponentially increase from the
+    edges to a maximum of 1 at the center.
 
+    Args:
+        width (int): The width of the desired image.
+        height (int): The height of the desired image.
+        decay_rate (float, optional): A positive value that controls the rate
+                                      at which the pixel values decrease from the
+                                      center. Higher values result in a sharper,
+                                      more focused gradient. Defaults to 5.0.
+
+    Returns:
+        np.ndarray: A 2D NumPy array of shape (height, width) with float
+                    pixel values between 0 and 1.
+    """
+    # Create coordinate grids for x and y
+    x = np.linspace(-1, 1, width)
+    y = np.linspace(-1, 1, height)
+    xx, yy = np.meshgrid(x, y)
+
+    # Calculate the squared distance from the center for each pixel
+    # The center is at (0, 0) in the normalized grid
+    distance_squared = xx**2 + yy**2
+
+    # Apply a negative exponential function to the distance
+    # exp(-0) = 1 at the center, and values decrease exponentially outwards
+    image = np.exp(-decay_rate * distance_squared)
+
+    return np.expand_dims(image, axis=-1)  # Add channel dimension
+
+def blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale, alpha=0.5):
+    """
+    Performs blended CutMix data augmentation on two NumPy arrays (images).
+
+    Blended CutMix works by creating a cutout region on img1 and replacing it
+    with a blend of the corresponding region from img2. The blending is
+    controlled by a mixing coefficient lambda.
+
+    Args:
+        img1 (np.ndarray): The first image, a NumPy array of shape (H, W, C).
+        img2 (np.ndarray): The second image, a NumPy array of the same shape.
+        alpha (float, optional): A hyperparameter for the beta distribution
+                                 from which the mixing coefficient lambda is
+                                 drawn. Defaults to 1.0, which corresponds to
+                                 a uniform distribution.
+
+    Returns:
+        np.ndarray: The augmented image, a NumPy array of the same shape.
+    """
+    # Check if images have the same shape
+    if img_lq.shape != img_lq2.shape:
+        raise ValueError("Input images must have the same shape.")
+
+    h, w, c = img_lq.shape
+    buffer = 5
+
+    # Draw a mixing coefficient lambda from a Beta distribution
+    # A value of 1.0 for alpha results in a uniform distribution (standard CutMix)
+    lam = np.random.beta(alpha, alpha)
+
+    # Generate a random bounding box for the cutout region
+    cut_w = np.random.uniform(low=buffer, high=w-buffer) * np.sqrt(1 - lam)
+    cut_h = np.random.uniform(low=buffer, high=h-buffer) * np.sqrt(1 - lam)
+
+    cx = np.random.uniform(low=buffer, high=w-buffer)
+    cy = np.random.uniform(low=buffer, high=h-buffer)
+
+    # Determine the coordinates of the bounding box
+    x1 = np.clip(int(cx - cut_w / 2), 0, w)
+    y1 = np.clip(int(cy - cut_h / 2), 0, h)
+    x2 = np.clip(int(cx + cut_w / 2), 0, w)
+    y2 = np.clip(int(cy + cut_h / 2), 0, h)
+
+    # Scale the bounding box coordinates for the GT image
+    x1_gt, y1_gt, x2_gt, y2_gt = int(x1 * scale), int(y1 * scale), int(x2 * scale), int(y2 * scale)
+
+    # Create a copy of the first image to modify
+    augmented_img_lq = np.copy(img_lq)
+    augmented_img_gt = np.copy(img_gt)
+
+    # Calculate the blend coefficient for the cutout region
+    # The new lambda for blending is the original lambda plus a small value
+    # to prevent a completely transparent blend.
+    decay_rate = np.random.uniform(1.0, 2.0)
+    exp_blend_coeff_lq = create_exponential_gradient(x2 - x1, y2 - y1, decay_rate)
+    exp_blend_coeff_gt = create_exponential_gradient(x2_gt - x1_gt, y2_gt - y1_gt, decay_rate)
+
+    # Blend the cutout regions of the two images
+    augmented_img_lq[y1:y2, x1:x2, :] = (augmented_img_lq[y1:y2, x1:x2, :] * (1 - exp_blend_coeff_lq) +
+                                      img_lq2[y1:y2, x1:x2, :] * exp_blend_coeff_lq)
+
+
+    augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] = (augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] * (1 - exp_blend_coeff_gt) +
+                                      img_gt2[y1_gt:y2_gt, x1_gt:x2_gt, :] * exp_blend_coeff_gt)
+
+    return augmented_img_lq, augmented_img_gt
+
+def mixup(img_lq, img_lq2, img_gt, img_gt2, alpha=1.0):
+    """
+    Performs Mixup data augmentation on two NumPy arrays (images).
+
+    Mixup works by taking a weighted sum of two images. The blending ratio is
+    determined by a random value drawn from a Beta distribution.
+
+    Args:
+        img1 (np.ndarray): The first image, a NumPy array of shape (H, W, C).
+        img2 (np.ndarray): The second image, a NumPy array of the same shape.
+        alpha (float, optional): A hyperparameter for the beta distribution
+                                 from which the mixing coefficient lambda is
+                                 drawn. Defaults to 1.0, which corresponds to
+                                 a uniform distribution.
+
+    Returns:
+        np.ndarray: The augmented image, a NumPy array of the same shape.
+    """
+    # Check if images have the same shape
+    if img_lq.shape != img_lq2.shape:
+        raise ValueError("Input images must have the same shape.")
+
+    if img_gt.shape != img_gt2.shape:
+        raise ValueError("Input images must have the same shape.")
+
+    # Draw a mixing coefficient lambda from a Beta distribution
+    # A value of 1.0 for alpha results in a uniform distribution
+    lam = np.random.beta(alpha, alpha)
+
+    # Perform the linear combination of the two images
+    augmented_img_lq = lam * img_lq + (1 - lam) * img_lq2
+    augmented_img_gt = lam * img_gt + (1 - lam) * img_gt2
+
+    return augmented_img_lq, augmented_img_gt
 
 @DATASET_REGISTRY.register()
 class TiffPairedImageDataset(data.Dataset):
@@ -216,6 +348,57 @@ class TiffPairedImageDataset(data.Dataset):
         else:
             self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
 
+    def augment_2(self, img_gt, img_lq, index, bands, lq_size, native_scale, scale):
+
+        if random.random() < 0.8:
+            return img_gt, img_lq
+        else:
+                # randomly select another image in the dataset
+                index2 = random.randint(0, len(self.paths) - 1)
+                while index2 == index:
+                    index2 = random.randint(0, len(self.paths) - 1)
+
+                gt_path2 = self.paths[index2]['gt_path']
+                lq_path2 = self.paths[index2]['lq_path']
+
+                with rasterio.open(gt_path2) as dataset:
+                    img_gt2 = dataset.read()
+                    img_gt2, _ = get_bands(img_gt2, bands)
+                    img_gt2 = img_gt2.transpose(1, 2, 0)  # H
+
+                dataset.close()
+
+                with rasterio.open(lq_path2) as dataset:
+                    img_lq2 = dataset.read()
+                    img_lq2, _ = get_bands(img_lq2, bands)
+                    img_lq2 = img_lq2.transpose(1, 2, 0)
+
+                dataset.close()
+
+                img_lq2 = center_crop(img_lq2, lq_size)
+                img_gt2 = center_crop(img_gt2, int(np.round(lq_size * native_scale)))
+                img_gt2 = cv2.resize(img_gt2, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
+
+                # enhance contrast per band
+                img_gt2 = enhance_contrast_per_band(img_gt2)
+                img_lq2 = enhance_contrast_per_band(img_lq2)
+
+                img_gt2 = match_histograms(img_gt2, img_lq2, channel_axis=-1)
+
+                if self.opt['use_cutmix'] and self.opt['use_mixup']:
+                    if random.random() < 0.5:
+                        img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
+                    else:
+                        img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
+                elif self.opt['use_cutmix']:
+                    img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
+                elif self.opt['use_mixup']:
+                    img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
+                else:
+                    raise ValueError('Either use_cutmix or use_mixup must be True to augment with another image.')
+
+                return img_gt, img_lq
+
     def __getitem__(self, index):
         # if self.file_client is None:
         #     self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
@@ -230,14 +413,14 @@ class TiffPairedImageDataset(data.Dataset):
 
         with rasterio.open(gt_path) as dataset:
             img_gt = dataset.read()
-            img_gt = get_bands(img_gt, bands)
+            img_gt, selected_bands = get_bands(img_gt, bands)
             img_gt = img_gt.transpose(1, 2, 0)  # H
 
         dataset.close()
 
         with rasterio.open(lq_path) as dataset:
             img_lq = dataset.read()
-            img_lq = get_bands(img_lq, bands)
+            img_lq, _ = get_bands(img_lq, selected_bands)
             img_lq = img_lq.transpose(1, 2, 0)
 
         dataset.close()
@@ -262,6 +445,9 @@ class TiffPairedImageDataset(data.Dataset):
             img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
             # flip, rotation
             img_gt, img_lq = augment([img_gt.copy(), img_lq.copy()], self.opt['use_hflip'], self.opt['use_rot'])
+
+            if self.opt['use_cutmix'] or self.opt['use_mixup']:
+                img_gt, img_lq = self.augment_2(img_gt, img_lq, index, selected_bands, lq_size, native_scale, scale)
 
         # color space transform
         if 'color' in self.opt and self.opt['color'] == 'y':

@@ -19,7 +19,9 @@ datasets:
     lq_size: 64
     use_hflip: true
     use_rot: true
-    bands: bgr # specify the bands to use [bgr, bgnir, all]
+    use_cutmix: true
+    use_mixup: true
+    bands: all # specify the bands to use [bgr, bgnir, all]
 
     # data loader
     use_shuffle: true
@@ -35,6 +37,9 @@ datasets:
     dataroot_lq: /home/luke/code/BasicSR/datasets/potamia_dataset/lr/tif/val
     io_backend:
       type: disk
+
+    gt_size: 256
+    lq_size: 64
 
   # val_2:
   #   name: Set14
