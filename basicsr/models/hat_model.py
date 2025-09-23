@@ -9,6 +9,8 @@ from basicsr.utils import imwrite, tensor2img
 import math
 from tqdm import tqdm
 from os import path as osp
+import rasterio as rio
+import os
 
 @MODEL_REGISTRY.register()
 class HATModel(SRModel):
@@ -192,6 +194,10 @@ class HATModelTiff(HATModel):
         with_metrics = self.opt['val'].get('metrics') is not None
         use_pbar = self.opt['val'].get('pbar', False)
 
+        save_format = self.opt['val'].get('save_format')
+        if save_format not in ['png', 'tif']:
+            raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
+
         if with_metrics:
             if not hasattr(self, 'metric_results'):  # only execute in the first run
                 self.metric_results = {metric: 0 for metric in self.opt['val']['metrics'].keys()}
@@ -217,10 +223,23 @@ class HATModelTiff(HATModel):
             self.post_process()
 
             visuals = self.get_current_visuals()
-            sr_img = dataloader.dataset.convert2img([visuals['result']])
+
+            if save_format == 'png':
+                sr_img = dataloader.dataset.convert2img([visuals['result']])
+            elif save_format == 'tif':
+                sr_img = dataloader.dataset.convert2tif([visuals['result']], val_data['native_scale'])
+            else:
+                raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
+
             metric_data['img'] = sr_img
             if 'gt' in visuals:
-                gt_img = dataloader.dataset.convert2img([visuals['gt']])
+                if save_format == 'png':
+                    gt_img = dataloader.dataset.convert2img([visuals['gt']])
+                elif save_format == 'tif':
+                    gt_img = dataloader.dataset.convert2tif([visuals['gt']], val_data['native_scale'])
+                else:
+                    raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
+
                 metric_data['img2'] = gt_img
                 del self.gt
 
@@ -232,15 +251,41 @@ class HATModelTiff(HATModel):
             if save_img:
                 if self.opt['is_train']:
                     save_img_path = osp.join(self.opt['path']['visualization'], img_name,
-                                             f'{img_name}_{current_iter}.png')
+                                             f'{img_name}_{current_iter}.{save_format}')
                 else:
                     if self.opt['val']['suffix']:
                         save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
-                                                 f'{img_name}_{self.opt["val"]["suffix"]}.png')
+                                                 f'{img_name}_{self.opt["val"]["suffix"]}.{save_format}')
                     else:
                         save_img_path = osp.join(self.opt['path']['visualization'], dataset_name,
-                                                 f'{img_name}_{self.opt["name"]}.png')
-                imwrite(sr_img, save_img_path)
+                                                 f'{img_name}_{self.opt["name"]}.{save_format}')
+
+                if save_format == 'png':
+                    imwrite(sr_img, save_img_path)
+                elif save_format == 'tif':
+
+                    dir_name = os.path.abspath(os.path.dirname(save_img_path))
+                    os.makedirs(dir_name, exist_ok=True)
+
+                    meta = val_data['meta_gt']
+                    meta.update({"driver": meta["driver"][0] if "driver" in meta else "GTiff",
+                                 "height": sr_img.shape[0],
+                                 "width": sr_img.shape[1],
+                                 "count": sr_img.shape[2],
+                                 "dtype": sr_img.dtype,
+                                 "crs": meta["crs"][0] if "crs" in meta else None,
+                                 "transform": meta["transform"] if "transform" in meta else None,
+                                 "nodata": meta["nodata"].numpy() if "nodata" in meta else None
+                                 })
+
+                    with rio.open(save_img_path, 'w', **meta) as dst:
+                        for i in range(sr_img.shape[2]):
+                            dst.write(sr_img[:, :, i], i + 1)
+                else:
+                    raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
+
+
+
 
             if with_metrics:
                 # calculate metrics

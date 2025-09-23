@@ -107,12 +107,14 @@ train:
     type: L1Loss
     loss_weight: 1.0
     reduction: mean
+    
 
 # validation settings
 val:
-  val_freq: !!float 5e3
+  val_freq: !!float 100 # 5e3
   save_img: true
   pbar: False
+  save_format: tif  # save image format, options: png | tif
 
   metrics:
     psnr:

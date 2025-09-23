@@ -16,6 +16,7 @@ import os
 import json
 
 import random
+from rasterio.transform import Affine
 
 @DATASET_REGISTRY.register()
 class PairedImageDataset(data.Dataset):
@@ -437,8 +438,9 @@ class TiffPairedImageDataset(data.Dataset):
             img = min_max_normalize(img, min_values, max_values)
             img, selected_bands = get_bands(img, bands)
             img = img.transpose(1, 2, 0)  # HWC
+            meta = dataset.meta
         dataset.close()
-        return img, selected_bands
+        return img, meta, selected_bands
 
     def augment_2(self, img_gt, img_lq, index, bands, lq_size, native_scale, scale):
 
@@ -453,8 +455,8 @@ class TiffPairedImageDataset(data.Dataset):
                 gt_path2 = self.paths[index2]['gt_path']
                 lq_path2 = self.paths[index2]['lq_path']
 
-                img_gt2, _ = self.read_tiff(gt_path2, bands, self.min_values_gt, self.max_values_gt)
-                img_lq2, _ = self.read_tiff(lq_path2, bands, self.min_values_lq, self.max_values_lq)
+                img_gt2,_ , _ = self.read_tiff(gt_path2, bands, self.min_values_gt, self.max_values_gt)
+                img_lq2,_ , _ = self.read_tiff(lq_path2, bands, self.min_values_lq, self.max_values_lq)
 
                 img_lq2 = center_crop(img_lq2, lq_size)
                 img_gt2 = center_crop(img_gt2, int(np.round(lq_size * native_scale)))
@@ -463,6 +465,7 @@ class TiffPairedImageDataset(data.Dataset):
                 img_gt2 = match_histograms(img_gt2, img_lq2, channel_axis=-1)
 
                 if self.opt['use_cutmix'] and self.opt['use_mixup']:
+                    # put ratio in config
                     if random.random() < 0.5:
                         img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
                     else:
@@ -474,6 +477,7 @@ class TiffPairedImageDataset(data.Dataset):
                 else:
                     raise ValueError('Either use_cutmix or use_mixup must be True to augment with another image.')
 
+                # add color jitter
                 return img_gt, img_lq
 
     def convert2img(self, img_data):
@@ -491,6 +495,39 @@ class TiffPairedImageDataset(data.Dataset):
             results = results[0]
         return results
 
+    def update_metadata(self, meta, img):
+        # Save the transform of the center-cropped raster for georeferencing
+        # Compute the offset for the crop
+        new_height, new_width = img.shape[0], img.shape[1]
+        orig_height, orig_width = meta['height'], meta['width']
+        start_x = (orig_width - new_width) // 2
+        start_y = (orig_height - new_height) // 2
+
+        # Update the transform
+        orig_transform = meta['transform']
+        new_transform = orig_transform * Affine.translation(start_x, start_y)
+        meta['transform'] = new_transform
+        meta['height'] = img.shape[0]
+        meta['width'] = img.shape[1]
+        meta['count'] = img.shape[2]  # Update the number of bands if necessary
+        meta['crs'] = str(meta['crs'])
+        return meta
+
+    def convert2tif(self, img_data, native_scale):
+        results = []
+        imgs = tensor2img(img_data, min_max=(0, 1), out_type=np.float64)
+
+        if isinstance(imgs, np.ndarray):
+            imgs = [imgs]
+
+        for img in imgs:
+            img = unnormalize(img,self.min_values_lq, self.max_values_lq)
+            img = cv2.resize(img,( int(np.round(self.opt['lq_size'] * native_scale)), int(np.round(self.opt['lq_size'] * native_scale))), interpolation=cv2.INTER_LANCZOS4)
+            results.append(img)
+        if len(results) == 1:
+            results = results[0]
+        return results
+
 
     def __getitem__(self, index):
         # if self.file_client is None:
@@ -503,16 +540,19 @@ class TiffPairedImageDataset(data.Dataset):
         # image range: [0, 1], float32.
         gt_path = self.paths[index]['gt_path']
         lq_path = self.paths[index]['lq_path']
-
-        img_gt, selected_bands = self.read_tiff(gt_path, bands, self.min_values_gt, self.max_values_gt)
-        img_lq, _ = self.read_tiff(lq_path, selected_bands, self.min_values_lq, self.max_values_lq)
+        img_gt, meta_gt, selected_bands = self.read_tiff(gt_path, bands, self.min_values_gt, self.max_values_gt)
+        img_lq, _, _ = self.read_tiff(lq_path, selected_bands, self.min_values_lq, self.max_values_lq)
 
         lq_size = self.opt['lq_size']
         native_scale = img_gt.shape[0] / img_lq.shape[0]
 
         img_lq = center_crop(img_lq, lq_size)
         img_gt = center_crop(img_gt, int(np.round(lq_size * native_scale)))
+        meta_gt = self.update_metadata(meta_gt, img_gt)
+
         img_gt = cv2.resize(img_gt, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
+
+
 
         # enhance contrast per band
         img_gt = match_histograms(img_gt, img_lq, channel_axis=-1)
@@ -548,7 +588,7 @@ class TiffPairedImageDataset(data.Dataset):
         #     normalize(img_lq, self.mean, self.std, inplace=True)
         #     normalize(img_gt, self.mean, self.std, inplace=True)
 
-        return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path}
+        return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path, 'meta_gt': meta_gt, 'native_scale': native_scale}
 
     def __len__(self):
         return len(self.paths)
