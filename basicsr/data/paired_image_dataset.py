@@ -4,12 +4,16 @@ from torchvision.transforms.functional import normalize
 from basicsr.data.data_util import paired_paths_from_folder, paired_paths_from_lmdb, paired_paths_from_meta_info_file
 from basicsr.data.transforms import augment, paired_random_crop
 from basicsr.utils import FileClient, bgr2ycbcr, imfrombytes, img2tensor, tensor2img
+from basicsr.utils.options import copy_opt_file
 from basicsr.utils.registry import DATASET_REGISTRY
 
 import rasterio
 import numpy as np
 import cv2
 from skimage.exposure import match_histograms
+from tqdm import tqdm
+import os
+import json
 
 import random
 
@@ -136,9 +140,32 @@ def enhance_contrast_per_band(img_data, lower_percentile=1.0, upper_percentile=9
         band_ = np.where(band == 0, np.inf, band)
         lower = np.percentile(band_, lower_percentile)
         upper = np.percentile(band, upper_percentile)
-        img_data_stretched[:, :, i] = norm_band(band, lower, upper) #* 255
+        img_data_stretched[:, :, i]= norm_band(band, lower, upper) * 255
 
-    return img_data_stretched
+    return img_data_stretched.astype(np.uint8)
+
+def min_max_normalize(img_data, min_values, max_values):
+    channel, _, _ = img_data.shape
+
+    img_data_normalized = np.zeros_like(img_data).astype(np.float64)
+    for i in range(channel):
+        band = img_data[i, :, :]
+        min_value = min_values[i]
+        max_value = max_values[i]
+        band = np.clip(band, min_value, max_value)
+        img_data_normalized[i, :, :] = (band - min_value) / (max_value - min_value)  # * 255
+
+    return img_data_normalized
+
+def unnormalize(img_data, min_values, max_values):
+    _, _, channel = img_data.shape
+    img_data_unnormalized = np.zeros_like(img_data).astype(np.float64)
+    for i in range(channel):
+        band = img_data[:, :, i]
+        min_value = min_values[i]
+        max_value = max_values[i]
+        img_data_unnormalized[:, :, i] = band * (max_value - min_value) + min_value  # * 255
+    return img_data_unnormalized
 
 def get_bands(image: np.ndarray, bands: str):
     """Select specific bands from the image.
@@ -329,8 +356,6 @@ class TiffPairedImageDataset(data.Dataset):
         # file client (io backend)
         self.file_client = None
         self.io_backend_opt = opt['io_backend']
-        self.mean = opt['mean'] if 'mean' in opt else None
-        self.std = opt['std'] if 'std' in opt else None
 
         self.gt_folder, self.lq_folder = opt['dataroot_gt'], opt['dataroot_lq']
         if 'filename_tmpl' in opt:
@@ -348,6 +373,73 @@ class TiffPairedImageDataset(data.Dataset):
         else:
             self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
 
+        # get min max values for normalization
+        root_path_gt = '/'.join(self.opt['dataroot_gt'].split('/')[:-1])
+        root_path_lq = '/'.join(self.opt['dataroot_lq'].split('/')[:-1])
+
+        self.min_values_gt, self.max_values_gt = self.get_dataset_min_max('gt', root_path_gt)
+        self.min_values_lq, self.max_values_lq = self.get_dataset_min_max('lq', root_path_lq)
+
+
+    def get_dataset_min_max(self, name, path):
+
+        min_max_file = f'{path}/min_max_values.json'
+        if os.path.exists(min_max_file):
+            print(f'Loading {name} min max values from {min_max_file}')
+
+            with open(min_max_file, 'r') as f:
+                min_max_values = json.load(f)
+            min_values = min_max_values['min_values']
+            max_values = min_max_values['max_values']
+            print(f'Loaded GT BGRNIR min values: {min_values}')
+            print(f'Loaded GT BGRNIR max values: {max_values}')
+            return min_values, max_values
+        else:
+            print(f'Calculating {name} min max values and saving to {min_max_file}')
+            img_paths = [p['gt_path'] for p in self.paths] if name == 'gt' else [p['lq_path'] for p in self.paths]
+            min_values, max_values = self.calculate_dataset_min_max(img_paths)
+            print(f'Calculated {name} BGRNIR min values: {min_values}')
+            print(f'Calculated {name} BGRNIR max values: {max_values}')
+
+            min_max_values = {
+                'min_values': min_values,
+                'max_values': max_values
+            }
+            with open(min_max_file, 'w') as f:
+                json.dump(min_max_values, f, indent=4)
+
+            return min_values, max_values
+
+
+    def calculate_dataset_min_max(self, img_paths):
+        min_values = [np.inf, np.inf, np.inf, np.inf] # b g r nir
+        max_values = [-np.inf, -np.inf, -np.inf, -np.inf]
+
+        for path in tqdm(img_paths):
+            with rasterio.open(path) as dataset:
+                img_lq2 = dataset.read()
+                for c in range(img_lq2.shape[0]):
+                    band = img_lq2[c, :, :]
+                    band_ = np.where(band == 0, np.inf, band)
+                    min_value = np.min(band_)
+                    max_value = np.max(band)
+
+                    if min_value < min_values[c]:
+                        min_values[c] = min_value.item()
+                    if max_value > max_values[c]:
+                        max_values[c] = max_value.item()
+            dataset.close()
+        return min_values, max_values
+
+    def read_tiff(self, path, bands, min_values, max_values):
+        with rasterio.open(path) as dataset:
+            img = dataset.read()
+            img = min_max_normalize(img, min_values, max_values)
+            img, selected_bands = get_bands(img, bands)
+            img = img.transpose(1, 2, 0)  # HWC
+        dataset.close()
+        return img, selected_bands
+
     def augment_2(self, img_gt, img_lq, index, bands, lq_size, native_scale, scale):
 
         if random.random() < 0.8:
@@ -361,27 +453,12 @@ class TiffPairedImageDataset(data.Dataset):
                 gt_path2 = self.paths[index2]['gt_path']
                 lq_path2 = self.paths[index2]['lq_path']
 
-                with rasterio.open(gt_path2) as dataset:
-                    img_gt2 = dataset.read()
-                    img_gt2, _ = get_bands(img_gt2, bands)
-                    img_gt2 = img_gt2.transpose(1, 2, 0)  # H
-
-                dataset.close()
-
-                with rasterio.open(lq_path2) as dataset:
-                    img_lq2 = dataset.read()
-                    img_lq2, _ = get_bands(img_lq2, bands)
-                    img_lq2 = img_lq2.transpose(1, 2, 0)
-
-                dataset.close()
+                img_gt2, _ = self.read_tiff(gt_path2, bands, self.min_values_gt, self.max_values_gt)
+                img_lq2, _ = self.read_tiff(lq_path2, bands, self.min_values_lq, self.max_values_lq)
 
                 img_lq2 = center_crop(img_lq2, lq_size)
                 img_gt2 = center_crop(img_gt2, int(np.round(lq_size * native_scale)))
                 img_gt2 = cv2.resize(img_gt2, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
-
-                # enhance contrast per band
-                img_gt2 = enhance_contrast_per_band(img_gt2)
-                img_lq2 = enhance_contrast_per_band(img_lq2)
 
                 img_gt2 = match_histograms(img_gt2, img_lq2, channel_axis=-1)
 
@@ -399,6 +476,22 @@ class TiffPairedImageDataset(data.Dataset):
 
                 return img_gt, img_lq
 
+    def convert2img(self, img_data):
+        results = []
+        imgs = tensor2img(img_data, min_max=(0, 1), out_type=np.float64)
+
+        if isinstance(imgs, np.ndarray):
+            imgs = [imgs]
+
+        for img in imgs:
+            img = unnormalize(img,self.min_values_lq, self.max_values_lq)
+            img = enhance_contrast_per_band(img)
+            results.append(img)
+        if len(results) == 1:
+            results = results[0]
+        return results
+
+
     def __getitem__(self, index):
         # if self.file_client is None:
         #     self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
@@ -411,19 +504,8 @@ class TiffPairedImageDataset(data.Dataset):
         gt_path = self.paths[index]['gt_path']
         lq_path = self.paths[index]['lq_path']
 
-        with rasterio.open(gt_path) as dataset:
-            img_gt = dataset.read()
-            img_gt, selected_bands = get_bands(img_gt, bands)
-            img_gt = img_gt.transpose(1, 2, 0)  # H
-
-        dataset.close()
-
-        with rasterio.open(lq_path) as dataset:
-            img_lq = dataset.read()
-            img_lq, _ = get_bands(img_lq, selected_bands)
-            img_lq = img_lq.transpose(1, 2, 0)
-
-        dataset.close()
+        img_gt, selected_bands = self.read_tiff(gt_path, bands, self.min_values_gt, self.max_values_gt)
+        img_lq, _ = self.read_tiff(lq_path, selected_bands, self.min_values_lq, self.max_values_lq)
 
         lq_size = self.opt['lq_size']
         native_scale = img_gt.shape[0] / img_lq.shape[0]
@@ -433,10 +515,10 @@ class TiffPairedImageDataset(data.Dataset):
         img_gt = cv2.resize(img_gt, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
 
         # enhance contrast per band
-        img_gt = enhance_contrast_per_band(img_gt)
-        img_lq = enhance_contrast_per_band(img_lq)
-
         img_gt = match_histograms(img_gt, img_lq, channel_axis=-1)
+
+        # gt_vis = visualize_img(img_gt, self.min_values_gt, self.max_values_gt)
+        # lq_vis = visualize_img(img_lq, self.min_values_lq, self.max_values_lq)
 
         # augmentation for training
         if self.opt['phase'] == 'train':
@@ -462,9 +544,9 @@ class TiffPairedImageDataset(data.Dataset):
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=False)
         # normalize
-        if self.mean is not None or self.std is not None:
-            normalize(img_lq, self.mean, self.std, inplace=True)
-            normalize(img_gt, self.mean, self.std, inplace=True)
+        # if self.mean is not None or self.std is not None:
+        #     normalize(img_lq, self.mean, self.std, inplace=True)
+        #     normalize(img_gt, self.mean, self.std, inplace=True)
 
         return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path}
 

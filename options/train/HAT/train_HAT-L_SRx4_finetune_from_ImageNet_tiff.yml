@@ -1,6 +1,6 @@
 # general settings
 name: train_HAT_SRx4_finetune_from_ImageNet_pretrain
-model_type: HATModel
+model_type: HATModelTiff
 scale: 4
 num_gpu: auto
 manual_seed: 0
@@ -17,6 +17,7 @@ datasets:
 
     gt_size: 256
     lq_size: 64
+
     use_hflip: true
     use_rot: true
     use_cutmix: true
