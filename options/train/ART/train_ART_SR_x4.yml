@@ -1,0 +1,140 @@
+# general settings for image SR training
+name: ART_SR_x4
+model_type: ARTModelTiff
+scale: 4
+num_gpu: 1
+manual_seed: 10
+
+# dataset and data loader settings
+datasets:
+  train:
+    task: SR
+    name: potamia_dataset_train
+    type: TiffPairedImageDataset
+    dataroot_gt: /home/luke/code/BasicSR/datasets/potamia_dataset/hr/tif/train
+    dataroot_lq: /home/luke/code/BasicSR/datasets/potamia_dataset/lr/tif/train
+    io_backend:
+      type: disk
+
+    gt_size: 256
+    lq_size: 64
+
+    use_hflip: true
+    use_rot: true
+    use_cutmix: true
+    use_mixup: true
+    bands: bgr # specify the bands to use [bgr, bgnir, all]
+
+    # data loader
+    use_shuffle: true
+    num_worker_per_gpu: 0
+    batch_size_per_gpu: 2
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val_1:
+    name: potamia_dataset_train
+    type: TiffPairedImageDataset
+    dataroot_gt: /home/luke/code/BasicSR/datasets/potamia_dataset/hr/tif/val
+    dataroot_lq: /home/luke/code/BasicSR/datasets/potamia_dataset/lr/tif/val
+    io_backend:
+      type: disk
+
+    gt_size: 256
+    lq_size: 64
+
+# network structures
+network_g:
+  type: ART_RS
+  upscale: 4
+  in_chans: 3
+  img_size: 64
+  window_size: 8
+  img_range: 1.
+  depths: [6, 6, 6, 6, 6, 6]
+  interval: [4, 4, 4, 4, 4, 4]
+  embed_dim: 180
+  num_heads: [6, 6, 6, 6, 6, 6]
+  mlp_ratio: 4
+  upsampler: 'pixelshuffle'
+  resi_connection: '1conv'
+
+# path
+path:
+  pretrain_network_g: /home/luke/code/BasicSR/experiments/pretrained_models/SR_ART_x4.pth # save training time if we finetune from x2 and halve initial lr.
+  strict_load_g: false
+  resume_state: ~
+
+# training settings
+train:
+  optim_g:
+    type: Adam
+    # lr: !!float 2e-4
+    lr: !!float 0.5e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    # milestones: [ 250000, 400000, 450000, 475000 ]
+    milestones: [ 125000, 200000, 225000, 237500 ]
+    gamma: 0.5
+
+  # total_iter: 500000
+  total_iter: 250000
+  warmup_iter: -1  # no warm up
+
+  # losses
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  # perceptual_opt:
+  #   type: PerceptualLoss
+  #   layer_weights:
+  #     # before relu
+  #     'conv1_2': 0.1
+  #     'conv2_2': 0.1
+  #     'conv3_4': 1
+  #     'conv4_4': 1
+  #     'conv5_4': 1
+  #   vgg_type: vgg19
+  #   use_input_norm: true
+  #   perceptual_weight: !!float 0.005
+  #   style_weight: 0.0
+  #   range_norm: false
+  #   criterion: l1
+
+# validation settings
+val:
+  val_freq: !!float 5e3
+  save_img: true
+  save_format: tif
+
+  metrics:
+    psnr: # metric name, can be arbitrary
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: true
+      better: higher
+
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: true
+      better: higher  # the higher, the better. Default: higher
+
+# logging settings
+logger:
+  print_freq: 200
+  save_checkpoint_freq: !!float 5e3
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# dist training settings
+dist_params:
+  backend: nccl
+  port: 29500

@@ -1,22 +1,25 @@
+import cv2
+import json
+import numpy as np
+import os
+import random
+import rasterio
+from rasterio.transform import Affine
+from skimage.exposure import match_histograms
 from torch.utils import data as data
 from torchvision.transforms.functional import normalize
+from tqdm import tqdm
 
-from basicsr.data.data_util import paired_paths_from_folder, paired_paths_from_lmdb, paired_paths_from_meta_info_file
+from basicsr.data.data_util import (
+    paired_paths_from_folder,
+    paired_paths_from_lmdb,
+    paired_paths_from_meta_info_file,
+)
 from basicsr.data.transforms import augment, paired_random_crop
 from basicsr.utils import FileClient, bgr2ycbcr, imfrombytes, img2tensor, tensor2img
 from basicsr.utils.options import copy_opt_file
 from basicsr.utils.registry import DATASET_REGISTRY
 
-import rasterio
-import numpy as np
-import cv2
-from skimage.exposure import match_histograms
-from tqdm import tqdm
-import os
-import json
-
-import random
-from rasterio.transform import Affine
 
 @DATASET_REGISTRY.register()
 class PairedImageDataset(data.Dataset):
@@ -51,58 +54,70 @@ class PairedImageDataset(data.Dataset):
         self.opt = opt
         # file client (io backend)
         self.file_client = None
-        self.io_backend_opt = opt['io_backend']
-        self.mean = opt['mean'] if 'mean' in opt else None
-        self.std = opt['std'] if 'std' in opt else None
+        self.io_backend_opt = opt["io_backend"]
+        self.mean = opt["mean"] if "mean" in opt else None
+        self.std = opt["std"] if "std" in opt else None
 
-        self.gt_folder, self.lq_folder = opt['dataroot_gt'], opt['dataroot_lq']
-        if 'filename_tmpl' in opt:
-            self.filename_tmpl = opt['filename_tmpl']
+        self.gt_folder, self.lq_folder = opt["dataroot_gt"], opt["dataroot_lq"]
+        if "filename_tmpl" in opt:
+            self.filename_tmpl = opt["filename_tmpl"]
         else:
-            self.filename_tmpl = '{}'
+            self.filename_tmpl = "{}"
 
-        if self.io_backend_opt['type'] == 'lmdb':
-            self.io_backend_opt['db_paths'] = [self.lq_folder, self.gt_folder]
-            self.io_backend_opt['client_keys'] = ['lq', 'gt']
-            self.paths = paired_paths_from_lmdb([self.lq_folder, self.gt_folder], ['lq', 'gt'])
-        elif 'meta_info_file' in self.opt and self.opt['meta_info_file'] is not None:
-            self.paths = paired_paths_from_meta_info_file([self.lq_folder, self.gt_folder], ['lq', 'gt'],
-                                                          self.opt['meta_info_file'], self.filename_tmpl)
+        if self.io_backend_opt["type"] == "lmdb":
+            self.io_backend_opt["db_paths"] = [self.lq_folder, self.gt_folder]
+            self.io_backend_opt["client_keys"] = ["lq", "gt"]
+            self.paths = paired_paths_from_lmdb(
+                [self.lq_folder, self.gt_folder], ["lq", "gt"]
+            )
+        elif "meta_info_file" in self.opt and self.opt["meta_info_file"] is not None:
+            self.paths = paired_paths_from_meta_info_file(
+                [self.lq_folder, self.gt_folder],
+                ["lq", "gt"],
+                self.opt["meta_info_file"],
+                self.filename_tmpl,
+            )
         else:
-            self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
+            self.paths = paired_paths_from_folder(
+                [self.lq_folder, self.gt_folder], ["lq", "gt"], self.filename_tmpl
+            )
 
     def __getitem__(self, index):
         if self.file_client is None:
-            self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
+            self.file_client = FileClient(
+                self.io_backend_opt.pop("type"), **self.io_backend_opt
+            )
 
-        scale = self.opt['scale']
+        scale = self.opt["scale"]
 
         # Load gt and lq images. Dimension order: HWC; channel order: BGR;
         # image range: [0, 1], float32.
-        gt_path = self.paths[index]['gt_path']
-        img_bytes = self.file_client.get(gt_path, 'gt')
+        gt_path = self.paths[index]["gt_path"]
+        img_bytes = self.file_client.get(gt_path, "gt")
         img_gt = imfrombytes(img_bytes, float32=True)
-        lq_path = self.paths[index]['lq_path']
-        img_bytes = self.file_client.get(lq_path, 'lq')
+        lq_path = self.paths[index]["lq_path"]
+        img_bytes = self.file_client.get(lq_path, "lq")
         img_lq = imfrombytes(img_bytes, float32=True)
 
         # augmentation for training
-        if self.opt['phase'] == 'train':
-            gt_size = self.opt['gt_size']
+        if self.opt["phase"] == "train":
+            gt_size = self.opt["gt_size"]
             # random crop
             img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
             # flip, rotation
-            img_gt, img_lq = augment([img_gt, img_lq], self.opt['use_hflip'], self.opt['use_rot'])
+            img_gt, img_lq = augment(
+                [img_gt, img_lq], self.opt["use_hflip"], self.opt["use_rot"]
+            )
 
         # color space transform
-        if 'color' in self.opt and self.opt['color'] == 'y':
+        if "color" in self.opt and self.opt["color"] == "y":
             img_gt = bgr2ycbcr(img_gt, y_only=True)[..., None]
             img_lq = bgr2ycbcr(img_lq, y_only=True)[..., None]
 
         # crop the unmatched GT images during validation or testing, especially for SR benchmark datasets
         # TODO: It is better to update the datasets, rather than force to crop
-        if self.opt['phase'] != 'train':
-            img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
+        if self.opt["phase"] != "train":
+            img_gt = img_gt[0 : img_lq.shape[0] * scale, 0 : img_lq.shape[1] * scale, :]
 
         # BGR to RGB, HWC to CHW, numpy to tensor
         img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=True)
@@ -111,18 +126,22 @@ class PairedImageDataset(data.Dataset):
             normalize(img_lq, self.mean, self.std, inplace=True)
             normalize(img_gt, self.mean, self.std, inplace=True)
 
-        return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path}
+        return {"lq": img_lq, "gt": img_gt, "lq_path": lq_path, "gt_path": gt_path}
 
     def __len__(self):
         return len(self.paths)
+
 
 def center_crop(image: np.ndarray, target_size: int):
     height, width, channel = image.shape
     if height != target_size or width != target_size:
         start_x = (width - target_size) // 2
         start_y = (height - target_size) // 2
-        return image[start_y:start_y + target_size, start_x:start_x + target_size, :]
+        return image[
+            start_y : start_y + target_size, start_x : start_x + target_size, :
+        ]
     return image
+
 
 def norm_band(band, lower, upper):
     """
@@ -131,6 +150,7 @@ def norm_band(band, lower, upper):
     band = np.clip(band, lower, upper)
     band = (band - band.min()) / (band.max() - band.min())
     return band
+
 
 def enhance_contrast_per_band(img_data, lower_percentile=1.0, upper_percentile=99.0):
     _, _, channel = img_data.shape
@@ -141,9 +161,10 @@ def enhance_contrast_per_band(img_data, lower_percentile=1.0, upper_percentile=9
         band_ = np.where(band == 0, np.inf, band)
         lower = np.percentile(band_, lower_percentile)
         upper = np.percentile(band, upper_percentile)
-        img_data_stretched[:, :, i]= norm_band(band, lower, upper) * 255
+        img_data_stretched[:, :, i] = norm_band(band, lower, upper) * 255
 
     return img_data_stretched.astype(np.uint8)
+
 
 def min_max_normalize(img_data, min_values, max_values):
     channel, _, _ = img_data.shape
@@ -154,9 +175,12 @@ def min_max_normalize(img_data, min_values, max_values):
         min_value = min_values[i]
         max_value = max_values[i]
         band = np.clip(band, min_value, max_value)
-        img_data_normalized[i, :, :] = (band - min_value) / (max_value - min_value)  # * 255
+        img_data_normalized[i, :, :] = (band - min_value) / (
+            max_value - min_value
+        )  # * 255
 
     return img_data_normalized
+
 
 def unnormalize(img_data, min_values, max_values):
     _, _, channel = img_data.shape
@@ -165,8 +189,11 @@ def unnormalize(img_data, min_values, max_values):
         band = img_data[:, :, i]
         min_value = min_values[i]
         max_value = max_values[i]
-        img_data_unnormalized[:, :, i] = band * (max_value - min_value) + min_value  # * 255
+        img_data_unnormalized[:, :, i] = (
+            band * (max_value - min_value) + min_value
+        )  # * 255
     return img_data_unnormalized
+
 
 def get_bands(image: np.ndarray, bands: str):
     """Select specific bands from the image.
@@ -178,17 +205,32 @@ def get_bands(image: np.ndarray, bands: str):
         np.ndarray: Image with selected bands.
     """
 
-    if bands == 'bgr':
-        return image[[0, 1, 2], :, :], 'bgr'
-    elif bands == 'bgnir':
-        return image[[0, 1, 3], :, :], 'bgnir'
-    elif bands == 'all':
+    if bands == "bgr":
+        return image[[0, 1, 2], :, :], "bgr"
+    elif bands == "bgnir":
+        return image[[0, 1, 3], :, :], "bgnir"
+    elif bands == "all":
         if random.random() < 0.5:
-            return image[[0, 1, 2], :, :], 'bgr' # bgr
+            return image[[0, 1, 2], :, :], "bgr"  # bgr
         else:
-            return image[[0, 1, 3], :, :], 'bgnir'  # bgnir
+            return image[[0, 1, 3], :, :], "bgnir"  # bgnir
     else:
-        raise ValueError(f'Unsupported bands: {bands}. Supported ones are "bgr", "bgnir", "all".')
+        raise ValueError(
+            f'Unsupported bands: {bands}. Supported ones are "bgr", "bgnir", "all".'
+        )
+
+
+def read_tiff(path, bands, min_values, max_values):
+    with rasterio.open(path) as dataset:
+        img = dataset.read()
+        img = min_max_normalize(img, min_values, max_values)
+        img, selected_bands = get_bands(img, bands)
+        img = img.transpose(1, 2, 0)  # HWC
+        meta = dataset.meta
+    dataset.close()
+    return img, meta, selected_bands
+
+
 def create_exponential_gradient(width, height, decay_rate=5.0):
     """
     Creates a 2D image with pixel values that exponentially increase from the
@@ -221,6 +263,7 @@ def create_exponential_gradient(width, height, decay_rate=5.0):
 
     return np.expand_dims(image, axis=-1)  # Add channel dimension
 
+
 def blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale, alpha=0.5):
     """
     Performs blended CutMix data augmentation on two NumPy arrays (images).
@@ -252,11 +295,11 @@ def blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale, alpha=0.5):
     lam = np.random.beta(alpha, alpha)
 
     # Generate a random bounding box for the cutout region
-    cut_w = np.random.uniform(low=buffer, high=w-buffer) * np.sqrt(1 - lam)
-    cut_h = np.random.uniform(low=buffer, high=h-buffer) * np.sqrt(1 - lam)
+    cut_w = np.random.uniform(low=buffer, high=w - buffer) * np.sqrt(1 - lam)
+    cut_h = np.random.uniform(low=buffer, high=h - buffer) * np.sqrt(1 - lam)
 
-    cx = np.random.uniform(low=buffer, high=w-buffer)
-    cy = np.random.uniform(low=buffer, high=h-buffer)
+    cx = np.random.uniform(low=buffer, high=w - buffer)
+    cy = np.random.uniform(low=buffer, high=h - buffer)
 
     # Determine the coordinates of the bounding box
     x1 = np.clip(int(cx - cut_w / 2), 0, w)
@@ -265,7 +308,12 @@ def blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale, alpha=0.5):
     y2 = np.clip(int(cy + cut_h / 2), 0, h)
 
     # Scale the bounding box coordinates for the GT image
-    x1_gt, y1_gt, x2_gt, y2_gt = int(x1 * scale), int(y1 * scale), int(x2 * scale), int(y2 * scale)
+    x1_gt, y1_gt, x2_gt, y2_gt = (
+        int(x1 * scale),
+        int(y1 * scale),
+        int(x2 * scale),
+        int(y2 * scale),
+    )
 
     # Create a copy of the first image to modify
     augmented_img_lq = np.copy(img_lq)
@@ -276,17 +324,23 @@ def blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale, alpha=0.5):
     # to prevent a completely transparent blend.
     decay_rate = np.random.uniform(1.0, 2.0)
     exp_blend_coeff_lq = create_exponential_gradient(x2 - x1, y2 - y1, decay_rate)
-    exp_blend_coeff_gt = create_exponential_gradient(x2_gt - x1_gt, y2_gt - y1_gt, decay_rate)
+    exp_blend_coeff_gt = create_exponential_gradient(
+        x2_gt - x1_gt, y2_gt - y1_gt, decay_rate
+    )
 
     # Blend the cutout regions of the two images
-    augmented_img_lq[y1:y2, x1:x2, :] = (augmented_img_lq[y1:y2, x1:x2, :] * (1 - exp_blend_coeff_lq) +
-                                      img_lq2[y1:y2, x1:x2, :] * exp_blend_coeff_lq)
+    augmented_img_lq[y1:y2, x1:x2, :] = (
+        augmented_img_lq[y1:y2, x1:x2, :] * (1 - exp_blend_coeff_lq)
+        + img_lq2[y1:y2, x1:x2, :] * exp_blend_coeff_lq
+    )
 
-
-    augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] = (augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] * (1 - exp_blend_coeff_gt) +
-                                      img_gt2[y1_gt:y2_gt, x1_gt:x2_gt, :] * exp_blend_coeff_gt)
+    augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] = (
+        augmented_img_gt[y1_gt:y2_gt, x1_gt:x2_gt, :] * (1 - exp_blend_coeff_gt)
+        + img_gt2[y1_gt:y2_gt, x1_gt:x2_gt, :] * exp_blend_coeff_gt
+    )
 
     return augmented_img_lq, augmented_img_gt
+
 
 def mixup(img_lq, img_lq2, img_gt, img_gt2, alpha=1.0):
     """
@@ -323,6 +377,7 @@ def mixup(img_lq, img_lq2, img_gt, img_gt2, alpha=1.0):
 
     return augmented_img_lq, augmented_img_gt
 
+
 @DATASET_REGISTRY.register()
 class TiffPairedImageDataset(data.Dataset):
     """Paired image dataset for image restoration.
@@ -356,64 +411,75 @@ class TiffPairedImageDataset(data.Dataset):
         self.opt = opt
         # file client (io backend)
         self.file_client = None
-        self.io_backend_opt = opt['io_backend']
+        self.io_backend_opt = opt["io_backend"]
 
-        self.gt_folder, self.lq_folder = opt['dataroot_gt'], opt['dataroot_lq']
-        if 'filename_tmpl' in opt:
-            self.filename_tmpl = opt['filename_tmpl']
+        self.gt_folder, self.lq_folder = opt["dataroot_gt"], opt["dataroot_lq"]
+        if "filename_tmpl" in opt:
+            self.filename_tmpl = opt["filename_tmpl"]
         else:
-            self.filename_tmpl = '{}'
+            self.filename_tmpl = "{}"
 
-        if self.io_backend_opt['type'] == 'lmdb':
-            self.io_backend_opt['db_paths'] = [self.lq_folder, self.gt_folder]
-            self.io_backend_opt['client_keys'] = ['lq', 'gt']
-            self.paths = paired_paths_from_lmdb([self.lq_folder, self.gt_folder], ['lq', 'gt'])
-        elif 'meta_info_file' in self.opt and self.opt['meta_info_file'] is not None:
-            self.paths = paired_paths_from_meta_info_file([self.lq_folder, self.gt_folder], ['lq', 'gt'],
-                                                          self.opt['meta_info_file'], self.filename_tmpl)
+        if self.io_backend_opt["type"] == "lmdb":
+            self.io_backend_opt["db_paths"] = [self.lq_folder, self.gt_folder]
+            self.io_backend_opt["client_keys"] = ["lq", "gt"]
+            self.paths = paired_paths_from_lmdb(
+                [self.lq_folder, self.gt_folder], ["lq", "gt"]
+            )
+        elif "meta_info_file" in self.opt and self.opt["meta_info_file"] is not None:
+            self.paths = paired_paths_from_meta_info_file(
+                [self.lq_folder, self.gt_folder],
+                ["lq", "gt"],
+                self.opt["meta_info_file"],
+                self.filename_tmpl,
+            )
         else:
-            self.paths = paired_paths_from_folder([self.lq_folder, self.gt_folder], ['lq', 'gt'], self.filename_tmpl)
+            self.paths = paired_paths_from_folder(
+                [self.lq_folder, self.gt_folder], ["lq", "gt"], self.filename_tmpl
+            )
 
         # get min max values for normalization
-        root_path_gt = '/'.join(self.opt['dataroot_gt'].split('/')[:-1])
-        root_path_lq = '/'.join(self.opt['dataroot_lq'].split('/')[:-1])
+        root_path_gt = "/".join(self.opt["dataroot_gt"].split("/")[:-1])
+        root_path_lq = "/".join(self.opt["dataroot_lq"].split("/")[:-1])
 
-        self.min_values_gt, self.max_values_gt = self.get_dataset_min_max('gt', root_path_gt)
-        self.min_values_lq, self.max_values_lq = self.get_dataset_min_max('lq', root_path_lq)
+        self.min_values_gt, self.max_values_gt = self.get_dataset_min_max(
+            "gt", root_path_gt, self.paths
+        )
+        self.min_values_lq, self.max_values_lq = self.get_dataset_min_max(
+            "lq", root_path_lq, self.paths
+        )
 
+    def get_dataset_min_max(self, name, path, paths):
 
-    def get_dataset_min_max(self, name, path):
-
-        min_max_file = f'{path}/min_max_values.json'
+        min_max_file = f"{path}/min_max_values.json"
         if os.path.exists(min_max_file):
-            print(f'Loading {name} min max values from {min_max_file}')
+            print(f"Loading {name} min max values from {min_max_file}")
 
-            with open(min_max_file, 'r') as f:
+            with open(min_max_file, "r") as f:
                 min_max_values = json.load(f)
-            min_values = min_max_values['min_values']
-            max_values = min_max_values['max_values']
-            print(f'Loaded GT BGRNIR min values: {min_values}')
-            print(f'Loaded GT BGRNIR max values: {max_values}')
+            min_values = min_max_values["min_values"]
+            max_values = min_max_values["max_values"]
+            print(f"Loaded GT BGRNIR min values: {min_values}")
+            print(f"Loaded GT BGRNIR max values: {max_values}")
             return min_values, max_values
         else:
-            print(f'Calculating {name} min max values and saving to {min_max_file}')
-            img_paths = [p['gt_path'] for p in self.paths] if name == 'gt' else [p['lq_path'] for p in self.paths]
+            print(f"Calculating {name} min max values and saving to {min_max_file}")
+            img_paths = (
+                [p["gt_path"] for p in paths]
+                if name == "gt"
+                else [p["lq_path"] for p in paths]
+            )
             min_values, max_values = self.calculate_dataset_min_max(img_paths)
-            print(f'Calculated {name} BGRNIR min values: {min_values}')
-            print(f'Calculated {name} BGRNIR max values: {max_values}')
+            print(f"Calculated {name} BGRNIR min values: {min_values}")
+            print(f"Calculated {name} BGRNIR max values: {max_values}")
 
-            min_max_values = {
-                'min_values': min_values,
-                'max_values': max_values
-            }
-            with open(min_max_file, 'w') as f:
+            min_max_values = {"min_values": min_values, "max_values": max_values}
+            with open(min_max_file, "w") as f:
                 json.dump(min_max_values, f, indent=4)
 
             return min_values, max_values
 
-
     def calculate_dataset_min_max(self, img_paths):
-        min_values = [np.inf, np.inf, np.inf, np.inf] # b g r nir
+        min_values = [np.inf, np.inf, np.inf, np.inf]  # b g r nir
         max_values = [-np.inf, -np.inf, -np.inf, -np.inf]
 
         for path in tqdm(img_paths):
@@ -432,53 +498,55 @@ class TiffPairedImageDataset(data.Dataset):
             dataset.close()
         return min_values, max_values
 
-    def read_tiff(self, path, bands, min_values, max_values):
-        with rasterio.open(path) as dataset:
-            img = dataset.read()
-            img = min_max_normalize(img, min_values, max_values)
-            img, selected_bands = get_bands(img, bands)
-            img = img.transpose(1, 2, 0)  # HWC
-            meta = dataset.meta
-        dataset.close()
-        return img, meta, selected_bands
-
     def augment_2(self, img_gt, img_lq, index, bands, lq_size, native_scale, scale):
 
         if random.random() < 0.8:
             return img_gt, img_lq
         else:
-                # randomly select another image in the dataset
+            # randomly select another image in the dataset
+            index2 = random.randint(0, len(self.paths) - 1)
+            while index2 == index:
                 index2 = random.randint(0, len(self.paths) - 1)
-                while index2 == index:
-                    index2 = random.randint(0, len(self.paths) - 1)
 
-                gt_path2 = self.paths[index2]['gt_path']
-                lq_path2 = self.paths[index2]['lq_path']
+            gt_path2 = self.paths[index2]["gt_path"]
+            lq_path2 = self.paths[index2]["lq_path"]
 
-                img_gt2,_ , _ = self.read_tiff(gt_path2, bands, self.min_values_gt, self.max_values_gt)
-                img_lq2,_ , _ = self.read_tiff(lq_path2, bands, self.min_values_lq, self.max_values_lq)
+            img_gt2, _, _ = read_tiff(
+                gt_path2, bands, self.paths[index2]["min_values_gt"], self.paths[index2]["max_values_gt"],
+            )
+            img_lq2, _, _ = read_tiff(
+                lq_path2, bands,  self.paths[index2]["min_values_lq"], self.paths[index2]["max_values_lq"],
+            )
 
-                img_lq2 = center_crop(img_lq2, lq_size)
-                img_gt2 = center_crop(img_gt2, int(np.round(lq_size * native_scale)))
-                img_gt2 = cv2.resize(img_gt2, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
+            img_lq2 = center_crop(img_lq2, lq_size)
+            img_gt2 = center_crop(img_gt2, int(np.round(lq_size * native_scale)))
+            img_gt2 = cv2.resize(
+                img_gt2,
+                (lq_size * scale, lq_size * scale),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
 
-                img_gt2 = match_histograms(img_gt2, img_lq2, channel_axis=-1)
+            img_gt2 = match_histograms(img_gt2, img_lq2, channel_axis=-1)
 
-                if self.opt['use_cutmix'] and self.opt['use_mixup']:
-                    # put ratio in config
-                    if random.random() < 0.5:
-                        img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
-                    else:
-                        img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
-                elif self.opt['use_cutmix']:
-                    img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
-                elif self.opt['use_mixup']:
-                    img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
+            if self.opt["use_cutmix"] and self.opt["use_mixup"]:
+                # put ratio in config
+                if random.random() < 0.5:
+                    img_lq, img_gt = blended_cutmix(
+                        img_lq, img_lq2, img_gt, img_gt2, scale
+                    )
                 else:
-                    raise ValueError('Either use_cutmix or use_mixup must be True to augment with another image.')
+                    img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
+            elif self.opt["use_cutmix"]:
+                img_lq, img_gt = blended_cutmix(img_lq, img_lq2, img_gt, img_gt2, scale)
+            elif self.opt["use_mixup"]:
+                img_lq, img_gt = mixup(img_lq, img_lq2, img_gt, img_gt2)
+            else:
+                raise ValueError(
+                    "Either use_cutmix or use_mixup must be True to augment with another image."
+                )
 
-                # add color jitter
-                return img_gt, img_lq
+            # add color jitter
+            return img_gt, img_lq
 
     def convert2img(self, img_data):
         results = []
@@ -488,7 +556,7 @@ class TiffPairedImageDataset(data.Dataset):
             imgs = [imgs]
 
         for img in imgs:
-            img = unnormalize(img,self.min_values_lq, self.max_values_lq)
+            img = unnormalize(img, self.min_values_lq, self.max_values_lq)
             img = enhance_contrast_per_band(img)
             results.append(img)
         if len(results) == 1:
@@ -499,18 +567,19 @@ class TiffPairedImageDataset(data.Dataset):
         # Save the transform of the center-cropped raster for georeferencing
         # Compute the offset for the crop
         new_height, new_width = img.shape[0], img.shape[1]
-        orig_height, orig_width = meta['height'], meta['width']
+        orig_height, orig_width = meta["height"], meta["width"]
         start_x = (orig_width - new_width) // 2
         start_y = (orig_height - new_height) // 2
 
         # Update the transform
-        orig_transform = meta['transform']
+        orig_transform = meta["transform"]
         new_transform = orig_transform * Affine.translation(start_x, start_y)
-        meta['transform'] = new_transform
-        meta['height'] = img.shape[0]
-        meta['width'] = img.shape[1]
-        meta['count'] = img.shape[2]  # Update the number of bands if necessary
-        meta['crs'] = str(meta['crs'])
+        meta["transform"] = new_transform
+        meta["height"] = img.shape[0]
+        meta["width"] = img.shape[1]
+        meta["count"] = img.shape[2]  # Update the number of bands if necessary
+        meta["crs"] = str(meta["crs"]) if meta["crs"] is not None else 'EPSG:4326'
+        meta["nodata"] = meta["nodata"] if meta["nodata"] is not None else 0.0
         return meta
 
     def convert2tif(self, img_data, native_scale):
@@ -521,74 +590,171 @@ class TiffPairedImageDataset(data.Dataset):
             imgs = [imgs]
 
         for img in imgs:
-            img = unnormalize(img,self.min_values_lq, self.max_values_lq)
-            img = cv2.resize(img,( int(np.round(self.opt['lq_size'] * native_scale)), int(np.round(self.opt['lq_size'] * native_scale))), interpolation=cv2.INTER_LANCZOS4)
+            img = unnormalize(img, self.min_values_lq, self.max_values_lq)
+            img = cv2.resize(
+                img,
+                (
+                    int(np.round(self.opt["lq_size"] * native_scale)),
+                    int(np.round(self.opt["lq_size"] * native_scale)),
+                ),
+                interpolation=cv2.INTER_LANCZOS4,
+            )
             results.append(img)
         if len(results) == 1:
             results = results[0]
         return results
 
-
     def __getitem__(self, index):
         # if self.file_client is None:
         #     self.file_client = FileClient(self.io_backend_opt.pop('type'), **self.io_backend_opt)
+        try:
+            scale = self.opt["scale"]
+            bands = self.opt["bands"] if "bands" in self.opt else "bgr"  # default to bgr
 
-        scale = self.opt['scale']
-        bands = self.opt['bands'] if 'bands' in self.opt else 'bgr'  # default to bgr
+            # Load gt and lq images. Dimension order: HWC; channel order: BGR;
+            # image range: [0, 1], float32.
+            gt_path = self.paths[index]["gt_path"]
+            lq_path =  self.paths[index]["lq_path"]
 
-        # Load gt and lq images. Dimension order: HWC; channel order: BGR;
-        # image range: [0, 1], float32.
-        gt_path = self.paths[index]['gt_path']
-        lq_path = self.paths[index]['lq_path']
-        img_gt, meta_gt, selected_bands = self.read_tiff(gt_path, bands, self.min_values_gt, self.max_values_gt)
-        img_lq, _, _ = self.read_tiff(lq_path, selected_bands, self.min_values_lq, self.max_values_lq)
+            img_gt, meta_gt, selected_bands = read_tiff(
+                gt_path,
+                bands,
+                self.paths[index]["min_values_gt"],
+                self.paths[index]["max_values_gt"],
+            )
+            img_lq, _, _ = read_tiff(
+                lq_path,
+                selected_bands,
+                self.paths[index]["min_values_lq"],
+                self.paths[index]["max_values_lq"],
+            )
 
-        lq_size = self.opt['lq_size']
-        native_scale = img_gt.shape[0] / img_lq.shape[0]
+            lq_size = self.opt["lq_size"]
+            native_scale = img_gt.shape[0] / img_lq.shape[0]
 
-        img_lq = center_crop(img_lq, lq_size)
-        img_gt = center_crop(img_gt, int(np.round(lq_size * native_scale)))
-        meta_gt = self.update_metadata(meta_gt, img_gt)
+            if (img_lq.shape[0] < lq_size) or (img_lq.shape[1] < lq_size):
+                print(f'Error processing: {self.paths[index]["lq_path"]}')
+                index = random.randint(0, len(self.paths) - 1)
+                self.__getitem__(index)
 
-        img_gt = cv2.resize(img_gt, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4)
+            img_lq = center_crop(img_lq, lq_size)
+            img_gt = center_crop(img_gt, int(np.round(lq_size * native_scale)))
+            meta_gt = self.update_metadata(meta_gt, img_gt)
 
+            img_gt = cv2.resize(
+                img_gt, (lq_size * scale, lq_size * scale), interpolation=cv2.INTER_LANCZOS4
+            )
 
+            # enhance contrast per band
+            img_gt = match_histograms(img_gt, img_lq, channel_axis=-1)
 
-        # enhance contrast per band
-        img_gt = match_histograms(img_gt, img_lq, channel_axis=-1)
+            # gt_vis = visualize_img(img_gt, self.min_values_gt, self.max_values_gt)
+            # lq_vis = visualize_img(img_lq, self.min_values_lq, self.max_values_lq)
 
-        # gt_vis = visualize_img(img_gt, self.min_values_gt, self.max_values_gt)
-        # lq_vis = visualize_img(img_lq, self.min_values_lq, self.max_values_lq)
+            # augmentation for training
+            if self.opt["phase"] == "train":
+                gt_size = self.opt["gt_size"]
+                # random crop
+                img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
+                # flip, rotation
+                img_gt, img_lq = augment(
+                    [img_gt.copy(), img_lq.copy()],
+                    self.opt["use_hflip"],
+                    self.opt["use_rot"],
+                )
 
-        # augmentation for training
-        if self.opt['phase'] == 'train':
-            gt_size = self.opt['gt_size']
-            # random crop
-            img_gt, img_lq = paired_random_crop(img_gt, img_lq, gt_size, scale, gt_path)
-            # flip, rotation
-            img_gt, img_lq = augment([img_gt.copy(), img_lq.copy()], self.opt['use_hflip'], self.opt['use_rot'])
+                if self.opt["use_cutmix"] or self.opt["use_mixup"]:
+                    img_gt, img_lq = self.augment_2(
+                        img_gt, img_lq, index, selected_bands, lq_size, native_scale, scale
+                    )
 
-            if self.opt['use_cutmix'] or self.opt['use_mixup']:
-                img_gt, img_lq = self.augment_2(img_gt, img_lq, index, selected_bands, lq_size, native_scale, scale)
+            # color space transform
+            if "color" in self.opt and self.opt["color"] == "y":
+                img_gt = bgr2ycbcr(img_gt, y_only=True)[..., None]
+                img_lq = bgr2ycbcr(img_lq, y_only=True)[..., None]
 
-        # color space transform
-        if 'color' in self.opt and self.opt['color'] == 'y':
-            img_gt = bgr2ycbcr(img_gt, y_only=True)[..., None]
-            img_lq = bgr2ycbcr(img_lq, y_only=True)[..., None]
+            # crop the unmatched GT images during validation or testing, especially for SR benchmark datasets
+            # TODO: It is better to update the datasets, rather than force to crop
+            if self.opt["phase"] != "train":
+                img_gt = img_gt[0 : img_lq.shape[0] * scale, 0 : img_lq.shape[1] * scale, :]
 
-        # crop the unmatched GT images during validation or testing, especially for SR benchmark datasets
-        # TODO: It is better to update the datasets, rather than force to crop
-        if self.opt['phase'] != 'train':
-            img_gt = img_gt[0:img_lq.shape[0] * scale, 0:img_lq.shape[1] * scale, :]
+            # BGR to RGB, HWC to CHW, numpy to tensor
+            img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=False)
+            # normalize
+            # if self.mean is not None or self.std is not None:
+            #     normalize(img_lq, self.mean, self.std, inplace=True)
+            #     normalize(img_gt, self.mean, self.std, inplace=True)
 
-        # BGR to RGB, HWC to CHW, numpy to tensor
-        img_gt, img_lq = img2tensor([img_gt, img_lq], bgr2rgb=True, float32=False)
-        # normalize
-        # if self.mean is not None or self.std is not None:
-        #     normalize(img_lq, self.mean, self.std, inplace=True)
-        #     normalize(img_gt, self.mean, self.std, inplace=True)
+            return {
+                "lq": img_lq,
+                "gt": img_gt,
+                "lq_path": lq_path,
+                "gt_path": gt_path,
+                "meta_gt": meta_gt,
+                "native_scale": native_scale,
+            }
+        except Exception as e:
+            print(f'Error: {e} while processing: {self.paths[index]["lq_path"]}')
+            index = random.randint(0, len(self.paths) - 1)
+            self.__getitem__(index)
 
-        return {'lq': img_lq, 'gt': img_gt, 'lq_path': lq_path, 'gt_path': gt_path, 'meta_gt': meta_gt, 'native_scale': native_scale}
 
     def __len__(self):
         return len(self.paths)
+
+
+@DATASET_REGISTRY.register()
+class TiffPairedImageMultiDataset(TiffPairedImageDataset):
+    def __init__(self, opt):
+        self.opt = opt
+        # file client (io backend)
+        self.file_client = None
+        self.io_backend_opt = opt["io_backend"]
+
+        self.gt_folders, self.lq_folders = opt["dataroot_gts"], opt["dataroot_lqs"]
+        if "filename_tmpl" in opt:
+            self.filename_tmpl = opt["filename_tmpl"]
+        else:
+            self.filename_tmpl = "{}"
+
+        self.paths = []
+        for lq_folder, gt_folder in zip(self.lq_folders, self.gt_folders):
+            if self.io_backend_opt["type"] == "lmdb":
+                self.io_backend_opt["db_paths"] = [lq_folder, gt_folder]
+                self.io_backend_opt["client_keys"] = ["lq", "gt"]
+                paths = paired_paths_from_lmdb([lq_folder, gt_folder], ["lq", "gt"])
+            elif (
+                "meta_info_file" in self.opt and self.opt["meta_info_file"] is not None
+            ):
+                paths = paired_paths_from_meta_info_file(
+                    [lq_folder, gt_folder],
+                    ["lq", "gt"],
+                    self.opt["meta_info_file"],
+                    self.filename_tmpl,
+                )
+            else:
+                paths = paired_paths_from_folder(
+                    [lq_folder, gt_folder], ["lq", "gt"], self.filename_tmpl
+                )
+
+            # get min max values for normalization
+            root_path_gt = "/".join(gt_folder.split("/")[:-1])
+            root_path_lq = "/".join(lq_folder.split("/")[:-1])
+
+            min_values_gt, max_values_gt = self.get_dataset_min_max(
+                "gt", root_path_gt, paths
+            )
+            min_values_lq, max_values_lq = self.get_dataset_min_max(
+                "lq", root_path_lq, paths
+            )
+
+            for i, path in enumerate(paths):
+                paths[i]["min_values_gt"] = min_values_gt
+                paths[i]["max_values_gt"] = max_values_gt
+                paths[i]["min_values_lq"] = min_values_lq
+                paths[i]["max_values_lq"] = max_values_lq
+
+            self.paths.extend(paths)
+
+            # hardcoded s2 values
+            self.min_values_lq, self.max_values_lq = [995.0, 1106.0, 1149.0, 1145.0], [19440, 18320, 20368, 16272]

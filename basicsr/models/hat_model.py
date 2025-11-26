@@ -215,33 +215,37 @@ class HATModelTiff(HATModel):
             img_name = osp.splitext(osp.basename(val_data['lq_path'][0]))[0]
             self.feed_data(val_data)
 
-            self.pre_process()
-            if 'tile' in self.opt:
-                self.tile_process()
-            else:
-                self.process()
-            self.post_process()
+            try:
+                self.pre_process()
+                if 'tile' in self.opt:
+                    self.tile_process()
+                else:
+                    self.process()
+                self.post_process()
 
-            visuals = self.get_current_visuals()
+                visuals = self.get_current_visuals()
 
-            if save_format == 'png':
-                sr_img = dataloader.dataset.convert2img([visuals['result']])
-            elif save_format == 'tif':
-                sr_img = dataloader.dataset.convert2tif([visuals['result']], val_data['native_scale'])
-            else:
-                raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
-
-            metric_data['img'] = sr_img
-            if 'gt' in visuals:
                 if save_format == 'png':
-                    gt_img = dataloader.dataset.convert2img([visuals['gt']])
+                    sr_img = dataloader.dataset.convert2img([visuals['result']])
                 elif save_format == 'tif':
-                    gt_img = dataloader.dataset.convert2tif([visuals['gt']], val_data['native_scale'])
+                    sr_img = dataloader.dataset.convert2tif([visuals['result']], val_data['native_scale'])
                 else:
                     raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
 
-                metric_data['img2'] = gt_img
-                del self.gt
+                metric_data['img'] = sr_img
+                if 'gt' in visuals:
+                    if save_format == 'png':
+                        gt_img = dataloader.dataset.convert2img([visuals['gt']])
+                    elif save_format == 'tif':
+                        gt_img = dataloader.dataset.convert2tif([visuals['gt']], val_data['native_scale'])
+                    else:
+                        raise ValueError(f'Wrong save_format {save_format}. Supported ones are png and tif.')
+
+                    metric_data['img2'] = gt_img
+                    del self.gt
+            except Exception as e:
+                name = val_data['lq_path'][0]
+                print(f'Error: {e} on image: {name}')
 
             # tentative for out of GPU memory
             del self.lq
